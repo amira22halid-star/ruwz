@@ -1,0 +1,51 @@
+name: Warzone patch notes bot
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"      # проверка каждые 30 минут (GitHub может опаздывать на 5-20 минут)
+  workflow_dispatch:             # кнопка ручного запуска
+    inputs:
+      max_age_days:
+        description: "Публиковать разделы патчноутов не старше N дней"
+        default: "20"
+      repost_latest:
+        description: "Тест: отправить самый свежий раздел заново, даже если он уже был отправлен"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write                # нужно, чтобы бот сохранял state.json
+
+concurrency:
+  group: wz-patchnotes
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Run bot
+        run: python bot.py
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          MAX_AGE_DAYS: ${{ github.event.inputs.max_age_days || '20' }}
+          REPOST_LATEST: ${{ github.event.inputs.repost_latest || 'false' }}
+
+      - name: Save state
+        if: always()
+        run: |
+          git config user.name "patchnotes-bot"
+          git config user.email "patchnotes-bot@users.noreply.github.com"
+          git add state.json || true
+          git diff --cached --quiet || (git commit -m "update state" && git push)
