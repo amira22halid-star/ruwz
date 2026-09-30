@@ -329,9 +329,10 @@ def make_chunks(lines, limit):
 
 
 # ============================ GROQ ============================
-def groq_chat(messages, max_tokens):
-    """Пробует модели по очереди. Возвращает (текст, модель) или (None, None)."""
-    for model in MODELS:
+def groq_chat(messages, max_tokens, offset=0):
+    """Пробует модели по очереди (offset сдвигает порядок). Возвращает (текст, модель) или (None, None)."""
+    k = offset % len(MODELS)
+    for model in MODELS[k:] + MODELS[:k]:
         for _ in range(3):
             body = {"model": model, "messages": messages, "temperature": 0.1, "max_tokens": max_tokens}
             if "gpt-oss" in model:
@@ -369,17 +370,18 @@ def groq_chat(messages, max_tokens):
     return None, None
 
 
-SYSTEM_PROMPT = """You are a professional translator of Call of Duty: Warzone patch notes from English to Russian for a Russian-speaking community.
-Translate the given fragment COMPLETELY and FAITHFULLY. Never summarize, shorten, merge, reorder, skip or add anything.
+SYSTEM_PROMPT = """You are an editor who retells Call of Duty: Warzone patch notes in RUSSIAN for a Russian-speaking community: briefly, to the point, losing no facts.
+OUTPUT LANGUAGE: RUSSIAN ONLY. Every sentence must be written in Russian. English is allowed ONLY for proper names (weapons, attachments, operators, maps, locations, modes, perks, field upgrades, killstreaks, events, camos, blueprints, game titles, quoted item names).
 
-RULES
-1. Every sentence, bullet, number, unit, date, time, percentage, price and name must appear in the translation. Copy numbers EXACTLY (keep decimal points as in the source, do not round). Keep arrows ↑ ↓ and "→" as they are. Convert units: m -> м, ms -> мс, m/s -> м/с.
-2. Names stay in original Latin spelling: weapons, attachments, operators, maps, locations, modes, perks, field upgrades, killstreaks, events, camos, blueprints, game titles, and quoted item names.
-3. Translate all ordinary words. Glossary: Damage = урон; Range = дальность; Maximum/Medium/Minimum Damage Range = максимальная/средняя/минимальная дальность урона; Recoil = отдача; Bullet Velocity = скорость пули; Aim Down Sight (ADS) Speed = скорость прицеливания (ADS); Headshot multiplier = множитель урона в голову; Ranked Play = рейтинговая игра; Skill Rating (SR) = рейтинг (SR); Deployment Fee = плата за вход (Deployment Fee); Limited-Time Mode = временный режим; Bug Fixes = исправления ошибок; buff = усиление; nerf = ослабление; All Modes = все режимы; BR/RES Only = только BR/Resurgence; Pre-Patch = было; Post-Patch = стало.
-4. Formatting for Discord (only these): a line starting with "## " -> bold uppercase line like **ГЕЙМПЛЕЙ**; a line starting with "###" or "####" -> bold line like **AN-94** or **Изменения (Adjusted)**; bullets: "- " -> "• ", nested (2 spaces) -> "  ◦ ", deeper -> "    ▪ " ; a line starting with "> " is a developer comment -> italic line: _Комментарий разработчиков: ..._ ; a line "Applies to: All Modes" -> italic line _Применяется: все режимы_ . Keep one fragment line per output line.
-5. Lines like "Maximum Damage Range: Damage 41 → 38↓ [All Modes]; Range 0 - 45m → 0 - 38m↓ [All Modes]" become "• Максимальная дальность урона: урон 41 → 38↓ [все режимы]; дальность 0 - 45 м → 0 - 38 м↓ [все режимы]".
-6. If you see a table flattened into label lines followed by value lines, rebuild it as one bullet per row, keeping every value.
-7. Output ONLY the translation: no preface, no comments, no code fences."""
+KEEP (nothing of this may be lost): every gameplay change (what was added / removed / changed / disabled), every number, percentage, date, time, price and unit (copy numbers EXACTLY, keep decimal points, do not round), conditions and limits, who/what/where it applies to.
+DROP: story/flavor text, marketing adjectives, repeated explanations, image captions, "we will keep monitoring" phrases. Developer comments (lines starting with "> "): drop, unless they contain a number or a rule not stated elsewhere - then fold it into the item in a few words.
+
+STYLE: one short bullet per change, telegraphic Russian ("Убрали ...", "Добавили ... за $4,000", "Урон 41 → 38"). Describe a whole event, mode or POI in 1-3 short bullets, not paragraphs. Never write long sentences.
+
+GLOSSARY: Damage = урон; Range = дальность; Maximum/Medium/Minimum Damage Range = макс./средняя/мин. дальность урона; Recoil = отдача; Bullet Velocity = скорость пули; Aim Down Sight (ADS) Speed = скорость прицеливания (ADS); Headshot multiplier = множитель урона в голову; Ranked Play = рейтинговая игра; Skill Rating (SR) = рейтинг (SR); Deployment Fee = плата за вход; Limited-Time Mode = временный режим; Bug Fixes = исправления ошибок; buff = усиление; nerf = ослабление; All Modes = все режимы; BR/RES Only = только BR/Resurgence; units: m -> м, ms -> мс, m/s -> м/с.
+
+FORMAT (Discord, only these): a line starting with "## " -> bold uppercase line like **ГЕЙМПЛЕЙ**; a line starting with "###" or "####" -> bold line like **AN-94** or **Баланс**; bullets: "- " -> "• ", nested (2 spaces) -> "  ◦ ", deeper -> "    ▪ "; a line "Applies to: All Modes" -> italic line _Применяется: все режимы_ ; lines like "Maximum Damage Range: Damage 41 → 38↓ [All Modes]; Range 0 - 45m → 0 - 38m↓ [All Modes]" become "• Макс. дальность урона: урон 41 → 38↓; дальность 0 - 45 → 0 - 38 м↓ [все режимы]". A table flattened into label lines followed by value lines: rebuild it as one short bullet per row with all values.
+Output ONLY the Russian text: no preface, no comments, no code fences."""
 
 
 def norm_num(tok):
@@ -396,28 +398,42 @@ def number_set(s):
     return {norm_num(t) for t in re.findall(r"\d+(?:\.\d+)?", s)}
 
 
+def cyr_share(s):
+    cyr = len(re.findall(r"[А-Яа-яЁё]", s))
+    lat = len(re.findall(r"[A-Za-z]", s))
+    return cyr / max(1, cyr + lat)
+
+
 def translate_chunk(text, head, idx, n, section_name):
+    """Переводит кусок; проверяет, что ответ по-русски и числа на месте; при провале повторяет на другой модели."""
     src_nums = number_set(text)
     allowed = max(1, int(0.05 * len(src_nums)))
-    best, best_missing, note = None, None, ""
-    for attempt in range(2):
+    best, best_key, note = None, None, ""
+    for attempt in range(3):
         user = (f"Document: {section_name}\nFragment {idx + 1} of {n}. "
                 f"Section heading before this fragment: {head or '-'}\n\n{text}{note}")
         out, model = groq_chat([{"role": "system", "content": SYSTEM_PROMPT},
-                                {"role": "user", "content": user}], 4000)
+                                {"role": "user", "content": user}], 4000, offset=attempt)
         if out is None:
-            return best  # None, если вообще не удалось; иначе лучший вариант из попыток
+            return best  # None, если не удалось совсем
         missing = src_nums - number_set(out)
-        if best is None or len(missing) < len(best_missing):
-            best, best_missing = out, missing
-        if len(missing) <= allowed:
+        lang_ok = len(out) < 200 or cyr_share(out) >= 0.4
+        key = (0 if lang_ok else 1, len(missing))
+        if best is None or key < best_key:
+            best, best_key = out, key
+        if lang_ok and len(missing) <= allowed:
             break
-        log(f"[check] фрагмент {idx + 1}: в переводе не хватает чисел {sorted(missing)[:12]}, повтор")
-        note = ("\n\nIMPORTANT: your previous translation omitted these numbers from the source: "
-                + ", ".join(sorted(missing)[:25]) + ". Translate again and include everything.")
+        note = "\n\nIMPORTANT:"
+        if not lang_ok:
+            log(f"[check] фрагмент {idx + 1}: ответ не на русском ({model}), повтор")
+            note += " your previous answer was NOT in Russian. Write the ENTIRE answer in Russian."
+        if len(missing) > allowed:
+            log(f"[check] фрагмент {idx + 1}: не хватает чисел {sorted(missing)[:12]}, повтор")
+            note += (" your previous answer omitted these numbers from the source: "
+                     + ", ".join(sorted(missing)[:25]) + ". Include every number.")
         time.sleep(5)
-    if best_missing:
-        log(f"[warn] фрагмент {idx + 1}: возможно пропущены числа {sorted(best_missing)[:12]}")
+    if best_key and best_key != (0, 0):
+        log(f"[warn] фрагмент {idx + 1}: результат с замечаниями {best_key}")
     return best
 
 
